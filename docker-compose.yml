@@ -1,0 +1,158 @@
+services:
+  backend:
+    image: reg.vittapcode.id.vn/kma-training-support-be/kma-training-support-be:latest
+    restart: unless-stopped
+    container_name: backend-kma-training-support
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+      - "${SOCKET_ADAPTER_PORT:-4001}:4001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-client:
+        condition: service_started
+      onlyoffice:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+  frontend:
+    image: reg.vittapcode.id.vn/kma-training-support-be/kma-training-support-fe:latest
+    restart: unless-stopped
+    container_name: frontend-kma-training-support
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    networks:
+      - app-network
+    env_file:
+      - .env
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: minio-kma-training-support
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - ./miniodata:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio-client:
+    image: minio/mc:latest
+    container_name: minio-client-kma-training-support
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-kma-training-support}
+      MINIO_ACCESSKEY: ${MINIO_ACCESSKEY:-app-access-key}
+      MINIO_SECRETKEY: ${MINIO_SECRETKEY:-app-secret-key}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Waiting for MinIO to be ready...';
+      sleep 10;
+      echo 'Configuring MinIO...';
+      mc alias set myminio http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
+
+      echo 'Creating user...';
+      mc admin user add myminio $${MINIO_ACCESSKEY} $${MINIO_SECRETKEY} || echo 'User already exists';
+
+      echo 'Attaching policy...';
+      mc admin policy attach myminio readwrite --user=$${MINIO_ACCESSKEY};
+
+      echo 'Creating bucket...';
+      mc mb myminio/$${MINIO_BUCKET_NAME} || echo 'Bucket already exists';
+
+      echo 'Setting bucket policy to public...';
+      mc anonymous set download myminio/$${MINIO_BUCKET_NAME};
+
+      echo '=================================';
+      echo 'MinIO setup completed successfully!';
+      echo '=================================';
+      echo 'Console URL: http://localhost:9001';
+      echo 'API URL: http://localhost:9000';
+      echo 'Root User: '$${MINIO_ROOT_USER};
+      echo 'Root Password: '$${MINIO_ROOT_PASSWORD};
+      echo 'Application Access Key: '$${MINIO_ACCESSKEY};
+      echo 'Application Secret Key: '$${MINIO_SECRETKEY};
+      echo 'Bucket Name: '$${MINIO_BUCKET_NAME};
+      echo '=================================';
+      exit 0;
+      "
+    networks:
+      - app-network
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    container_name: postgres-kma-training-support
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-postgredb}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgredb}
+      POSTGRES_DB: ${DB_NAME:-kma-training-support}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USERNAME:-postgredb} -d ${DB_NAME:-kma-training-support}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  onlyoffice:
+    image: onlyoffice/documentserver:latest
+    container_name: onlyoffice-kma-training-support
+    restart: unless-stopped
+    ports:
+      - "${ONLYOFFICE_PORT:-8080}:80"
+    environment:
+      JWT_ENABLED: ${ONLYOFFICE_JWT_ENABLED:-true}
+      JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:-PlMJDE98I6n8cIIfMR6k7yC0yjBIKuxranlg3Ia6}
+      JWT_HEADER: ${ONLYOFFICE_JWT_HEADER:-Authorization}
+      ALLOW_PRIVATE_IP_ADDRESS: "true"
+      ALLOW_META_IP_ADDRESS: "true"
+    volumes:
+      - ./onlyoffice_logs:/var/log/onlyoffice
+      - ./onlyoffice_data:/var/www/onlyoffice/Data
+      - ./onlyoffice_lib:/var/lib/onlyoffice
+      - ./onlyoffice_fonts:/usr/share/fonts
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  app-network:
+    driver: bridge
